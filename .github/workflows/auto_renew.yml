@@ -1,4 +1,4 @@
-name: 多账号自动登录续期任务
+name: 多账号自动登录续期任务(高阶指纹伪装版)
 
 on:
   schedule:
@@ -20,7 +20,6 @@ jobs:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
-        # 将输出写入日志，只有失败时才打印到控制台
         run: |
           (
             set -e
@@ -34,7 +33,6 @@ jobs:
       - name: 🚀 智能解析全协议节点并启动代理内核
         env:
           PROXY: ${{ secrets.PROXY }}
-          # 【修复核心】将整段 Python 代码存为名为 PY_SCRIPT 的环境变量，完美避开缩进冲突！
           PY_SCRIPT: |
             import os, sys, json, base64
             from urllib.parse import urlparse, parse_qs
@@ -101,7 +99,8 @@ jobs:
                         if security == "reality":
                             outbound["streamSettings"]["realitySettings"] = {"publicKey": qs.get("pbk", [""])[0], "shortId": qs.get("sid", [""])[0], "fingerprint": qs.get("fp", ["chrome"])[0]}
 
-                elif link.startswith("socks5://"):
+                elif link.startswith("socks5://") or link.startswith("socks://"):
+                    # 如果 Python 脚本被意外触发，也支持解析
                     outbound["protocol"] = "socks"
                     parsed = urlparse(link)
                     server = {"address": parsed.hostname, "port": parsed.port or 1080}
@@ -116,14 +115,11 @@ jobs:
                 config["outbounds"].append(outbound)
                 with open("config.json", "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=2)
-                    
-                print(f"✅ 成功将 {link[:8]}... 链接转换为 config.json 配置文件！")
                 
             except Exception as e:
                 print(f"❌ 解析链接时发生致命错误: {e}")
                 sys.exit(1)
         run: |
-          # 检查环境变量中是否填写了代理链接
           if [ -z "$PROXY" ]; then
               echo "❌ 错误：环境变量 PROXY 为空！"
               exit 1
@@ -133,7 +129,6 @@ jobs:
           # 分支 1：处理 Hysteria2 协议 (hy2:// 或 hysteria2://)
           # ==========================================
           if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
-              
               (
                 set -e
                 wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
@@ -156,12 +151,25 @@ jobs:
               echo "socks5:" >> config.yaml
               echo "  listen: 127.0.0.1:10808" >> config.yaml
               
-              echo "✅ 成功将 Hysteria2 链接转换为 config.yaml 配置文件！"
-              
+              # 写入全局变量：告知下一步使用本地转发端口
+              echo "FINAL_PROXY=socks5://127.0.0.1:10808" >> $GITHUB_ENV
+              echo "✅ 成功配置 Hysteria2 本地内核！"
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
+              sleep 5
               
           # ==========================================
-          # 分支 2：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
+          # 🌟 【新增爆改点】分支 2：处理原生 SOCKS5 协议直连
+          # ==========================================
+          elif [[ "$PROXY" == socks5://* ]] || [[ "$PROXY" == socks://* ]]; then
+              echo "⚡ [智能识别] 检测到您填写的是原生 SOCKS5 代理链接！"
+              echo "⚡ 无需下载任何外部代理内核，脚本将直接对接远程节点。"
+              
+              # 直接将用户的远程 SOCKS5 节点写入 GitHub 环境变量，完全跳过本地内核
+              echo "FINAL_PROXY=$PROXY" >> $GITHUB_ENV
+              echo "✅ 原生 SOCKS5 链路准备就绪！"
+
+          # ==========================================
+          # 分支 3：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
           # ==========================================
           else
               (
@@ -175,33 +183,37 @@ jobs:
                 exit 1
               }
               
-              # 【修复核心】安全地将存放在环境变量中的 Python 代码输出为实体文件
               printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
-              
-              # 运行 Python 解析脚本
               python -u parse_proxy.py
               
-              # 后台静默启动 Xray
+              # 写入全局变量：告知下一步使用本地转发端口
+              echo "FINAL_PROXY=socks5://127.0.0.1:10808" >> $GITHUB_ENV
               nohup ./xray run -c config.json > proxy.log 2>&1 &
+              sleep 5
           fi
-          
-          # 等待 5 秒建连
-          sleep 5
 
-      - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
+      - name: 运行自动化脚本 (指纹环境深度整合版)
         env:
           acount: ${{ secrets.ACOUNT }}
-          HTTP_PROXY: socks5://127.0.0.1:10808
-          HTTPS_PROXY: socks5://127.0.0.1:10808
+          # 🌟 动态读取上一步判断出来的最佳代理方案（如果是原生 socks5 就会直接用它）
+          HTTP_PROXY: ${{ env.FINAL_PROXY }}
+          HTTPS_PROXY: ${{ env.FINAL_PROXY }}
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
           (
             set -e
-            curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
+            # 动态检测当前代理网络连通性
+            curl -sS -x "$HTTP_PROXY" -I https://www.baidu.com --connect-timeout 10
           ) > curl_test.log 2>&1 || { 
             echo "❌ 代理连接失败！为您提取底层日志："; 
             echo "================ 代理核心运行日志 ================";
-            cat proxy.log;
+            if [ -f proxy.log ]; then
+              cat proxy.log
+            else
+              echo "当前处于 [原生 SOCKS5 直连模式]，未启动任何本地内核。"
+              echo "请检查你在 GitHub Secrets 中配置的 PROXY 节点是否在线、账户密码或端口是否正确。"
+              echo "当前尝试连接的节点为: $HTTP_PROXY"
+            fi
             echo "====================================================";
             exit 1; 
           }
@@ -209,9 +221,10 @@ jobs:
           (
             set -e
             sudo apt-get update
-            sudo apt-get install -y xvfb fonts-noto-cjk
+            echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
+            sudo apt-get install -y xvfb fonts-noto-cjk ttf-mscorefonts-installer libxss1 libappindicator1 libgconf-2-4 libxi6 libgstreamer1.0-0
           ) > apt_install.log 2>&1 || {
-            echo "❌ 虚拟屏幕和字体安装失败，详细日志如下："
+            echo "❌ 虚拟物理指纹库与字体安装失败，详细日志如下："
             cat apt_install.log
             exit 1
           }
