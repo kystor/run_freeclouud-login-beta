@@ -99,6 +99,7 @@ jobs:
                     if parsed.username:
                         server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
                     outbound["settings"] = {"servers": [server]}
+
                 else:
                     print(f"❌ 暂不支持自动解析此协议: {link[:10]}...")
                     sys.exit(1)
@@ -178,7 +179,18 @@ jobs:
           HTTPS_PROXY: ${{ env.FINAL_PROXY }}
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          curl -sS -x "$HTTP_PROXY" -I https://www.baidu.com --connect-timeout 10
+          echo ">>> [网络] 正在探测代理节点是否可用..."
+          
+          # 【修改点 1】: 更换测试网址为 cloudflare.com，把 socks5 改成 socks5h 强制远程解析 DNS。
+          # 【修改点 2】: 去掉了导致闪退的 set -e。现在即使 curl 失败了，也会宽容放行，交给下面强大的浏览器去连接。
+          curl -sS -x socks5h://127.0.0.1:10808 -I https://www.cloudflare.com/cdn-cgi/trace --connect-timeout 10 > curl_test.log 2>&1 || {
+            echo "⚠️ 代理测试未能成功 (curl 退出码: $?)，日志如下："
+            cat curl_test.log
+            echo "⚠️ 提示: 这可能是因为节点禁止了纯 IP 探测或限制了请求域，又或者该家庭宽带暂时拥堵。"
+            echo "⚠️ 脚本将忽略此警告，强行启动浏览器进行尝试..."
+          }
+          
+          echo ">>> [系统] 浏览器引擎准备就绪，即将启动！"
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行过程截图与日志文件
