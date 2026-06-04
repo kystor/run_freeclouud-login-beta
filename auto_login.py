@@ -5,13 +5,18 @@ import base64
 import sys
 import re  
 import random
+import asyncio
+from urllib.parse import urlparse
+
+# --- 核心驱动 ---
 from seleniumbase import SB
 import ddddocr
-# 引入 Selenium 底层的鼠标动作链，用于实现精准的坐标物理点击
-from selenium.webdriver.common.action_chains import ActionChains
+import zendriver
+from zendriver.core.element import Element
+import latest_user_agents
 
 # ==========================================
-# 1. 网站配置区域 (定义所有需要用到的网页元素定位器)
+# 1. 网站配置与辅助功能
 # ==========================================
 CONFIG = {
     "target_url": "https://run.freecloud.ltd/login",
@@ -20,9 +25,7 @@ CONFIG = {
     "captcha_img_selector": "#allow_login_email_captcha",          
     "captcha_input_selector": "#captcha_allow_login_email_captcha", 
     "login_btn_selector": 'button[type="submit"]',
-    
     "user_center_selector": 'a[href="clientarea"]',
-    
     "sign_in_url": 'https://run.freecloud.ltd/addons?_plugin=5&_controller=index&_action=index',
     "sign_in_btn_selector": 'button[onclick="showMathVerification()"]', 
     "math_question_selector": '#mathQuestion',                       
@@ -31,7 +34,6 @@ CONFIG = {
     "popup_content_selector": ".layui-layer-content", 
     "popup_confirm_btn_selector": ".layui-layer-btn0", 
     "points_balance_selector": "div.alert-success span",
-    
     "server_list_url": "https://run.freecloud.ltd/service?groupid=305", 
     "server_checkbox_selector": '.row-checkbox',              
     "list_renew_btn_selector": '#readBtn',                    
@@ -40,156 +42,90 @@ CONFIG = {
     "modal_pay_btn_selector": 'button.pay-now'                
 }
 
-# 自动创建一个文件夹用来保存运行时的截图，方便排查报错
 os.makedirs("screenshots", exist_ok=True)
 
 def take_screenshot(sb, step_name, username="system"):
-    """
-    截图辅助函数：将当前浏览器的实时画面保存下来。
-    在 GitHub Actions 没有界面的情况下，这是我们唯一的“眼睛”。
-    """
     safe_name = username.replace("@", "_").replace(".", "_")
     filepath = f"screenshots/{safe_name}_{step_name}.png"
     try:
         sb.save_screenshot(filepath)
         print(f"    📸 已截图保存: {filepath}")
-    except Exception as e:
-        print(f"    ⚠️ 截图失败 ({filepath}): {e}")
-
-# ==========================================
-# 2. Cloudflare 防护绕过模块 (核心攻防区)
-# ==========================================
-def is_cloudflare_interstitial(sb) -> bool:
-    """
-    判断当前页面是否被 Cloudflare 的“5秒盾”拦截。
-    包含了中英文双语识别，防止因为 IP 变动导致漏判。
-    """
-    try:
-        page_source = sb.get_page_source()
-        title = sb.get_title().lower() if sb.get_title() else ""
-        
-        # 防火墙拦截页面的关键词特征
-        indicators = [
-            "Just a moment", "Verify you are human", "Checking your browser", 
-            "Checking if the site connection is secure",
-            "正在进行安全验证", "请验证您是真人", "challenges.cloudflare.com"
-        ]
-        
-        for ind in indicators:
-            if ind in page_source:
-                return True
-                
-        if "just a moment" in title or "attention required" in title:
-            return True
-            
-        body_len = sb.execute_script('(function() { return document.body ? document.body.innerText.length : 0; })();')
-        if body_len is not None and body_len < 200 and "challenges.cloudflare.com" in page_source:
-            return True
-            
-        return False
-    except:
-        return False
-
-def bypass_cloudflare_interstitial(sb, max_attempts=4) -> bool:
-    """
-    尝试绕过最初的 Cloudflare 5秒盾检测页面。
-    """
-    print("    🛡️ 检测到 CF 5秒盾，准备破除...")
-    for attempt in range(max_attempts):
-        print(f"      ▶ 尝试绕过 ({attempt+1}/{max_attempts})...")
-        try:
-            sb.uc_gui_click_captcha()
-            time.sleep(6)
-            if not is_cloudflare_interstitial(sb):
-                print("      ✅ CF 5秒盾已通过！")
-                return True
-        except Exception:
-            pass
-        time.sleep(3)
-    return False
-
-def handle_turnstile_verification(sb) -> bool:
-    """
-    【升级版】处理 Cloudflare 真人复选框验证（Turnstile）。
-    采用三重点击策略，专门解决 GitHub 虚拟机中点不到验证码框的问题。
-    """
-    try:
-        cookie_btn = 'button[data-cky-tag="accept-button"]'
-        if sb.is_element_visible(cookie_btn):
-            sb.click(cookie_btn)
-            time.sleep(1)
-    except:
-        pass
-
-    # 1. 锁定包含 Cloudflare 验证码的跨域 iframe
-    iframe_selector = 'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]'
-    
-    # 2. 注入 JS 强行把验证码框滚动到屏幕正中央，防止鼠标点到屏幕外面
-    sb.execute_script(f'''
-        try {{
-            var t = document.querySelector('{iframe_selector}') || document.querySelector('.cf-turnstile');
-            if (t) t.scrollIntoView({{behavior:'smooth', block:'center'}});
-        }} catch(e) {{}}
-    ''')
-    time.sleep(2)
-
-    # 3. 探查页面上到底有没有弹那个烦人的验证码
-    has_turnstile = False
-    for _ in range(15):
-        if sb.is_element_present(iframe_selector) or sb.is_element_present('.cf-turnstile'):
-            has_turnstile = True
-            break
-        time.sleep(1)
-
-    if not has_turnstile:
-        print("    🟢 无感验证通过 (未发现 Turnstile 验证码框)")
-        return True
-
-    print("    🧩 发现验证码，执行【多重拟人物理点击】策略...")
-    
-    # === 三重点击保险开始 ===
-    
-    # 策略 1: SeleniumBase 原生 UC 穿透点击
-    try:
-        print("      ▶ 尝试策略 1 (UC 穿透点击)...")
-        sb.uc_click(iframe_selector)
-        time.sleep(2)
-    except Exception as e:
-        print(f"      ⚠️ 策略 1 未生效: {e}")
-
-    # 策略 2: ActionChains 纯坐标物理点击 (越过 HTML 直接让鼠标砸向屏幕中心)
-    try:
-        print("      ▶ 尝试策略 2 (鼠标坐标物理偏移点击)...")
-        if sb.is_element_visible(iframe_selector):
-            iframe_el = sb.wait_for_element(iframe_selector)
-            actions = ActionChains(sb.driver)
-            actions.move_to_element(iframe_el).click().perform()
-            print("      ✅ 策略 2 坐标点击指令已发送。")
-            time.sleep(2)
-    except Exception as e:
-        print(f"      ⚠️ 策略 2 未生效: {e}")
-
-    # 策略 3: GUI 图像识别点击 (兜底方案)
-    try:
-        print("      ▶ 尝试策略 3 (GUI 图像识别点击)...")
-        sb.uc_gui_click_captcha()
     except Exception:
         pass
-        
-    print("    ⏳ 正在等待 Cloudflare 验证完成并重定向至目标网站...")
-    
-    # 4. 智能判断：耐心等 20 秒，只有邮箱输入框露脸了，才算闯关成功
-    try:
-        sb.wait_for_element_visible('#emailInp', timeout=20)
-        print("    ✅ 验证通过，已成功进入最终登录页面！")
-        return True
-    except Exception:
-        print("    ❌ 验证超时：Cloudflare 拦截未能通过。")
-        print("    💡 提示：如果日志显示已发送点击指令，但依然卡在这里，说明当前代理 IP 被 CF 彻底锁死了，建议去后台换个 IP。")
-        return False
 
 # ==========================================
-# 3. 单账号自动化流水线 (登录 -> 签到 -> 续费)
+# 2. 【核心引擎】Zendriver 破盾模块
+# ==========================================
+def get_chrome_user_agent():
+    """从最新列表中随机抽取真实的 Chrome User-Agent"""
+    chrome_user_agents = [
+        ua for ua in latest_user_agents.get_latest_user_agents()
+        if "Chrome" in ua and "Edg" not in ua
+    ]
+    return random.choice(chrome_user_agents)
+
+async def fetch_cf_clearance(target_url, proxy_url):
+    """
+    第一阶段：底层破盾。
+    利用 Zendriver 启动浏览器，绕过常规 DOM 限制，直接透过 shadow_root 发出底层电信号，
+    抢夺 Cloudflare 的免死金牌 (cf_clearance Cookie)。
+    """
+    ua = get_chrome_user_agent()
+    # 保持 Headless=False 配合 Xvfb 达到完美伪装
+    config = zendriver.Config(headless=False)
+    config.add_argument(f"--user-agent={ua}")
+    if proxy_url:
+        config.add_argument(f"--proxy-server={proxy_url}")
+    
+    driver = zendriver.Browser(config)
+    await driver.start()
+    
+    print(f"    🛡️ [先遣部队] 启动 Zendriver 底层 CDP 协议，正向目标进发...")
+    
+    try:
+        await driver.get(target_url)
+        start_time = time.time()
+        final_cookies = []
+        
+        # 持续 45 秒侦测并对抗 Cloudflare 的 5 秒盾
+        while time.time() - start_time < 45:
+            # 1. 检查是否已经被颁发了免死金牌
+            cookies = await driver.cookies.get_all()
+            final_cookies = [c.to_json() for c in cookies]
+            if any(c["name"] == "cf_clearance" for c in final_cookies):
+                print("    ✅ [先遣部队] 破盾成功！已拿到 cf_clearance Cookie。")
+                break
+            
+            # 2. 如果卡在验证码，直接穿透 shadow_root 提取深层元素并强制点击
+            try:
+                widget_input = await driver.main_tab.find("input")
+                if widget_input and widget_input.parent and widget_input.parent.shadow_roots:
+                    challenge = Element(
+                        widget_input.parent.shadow_roots[0],
+                        driver.main_tab,
+                        widget_input.parent.tree,
+                    )
+                    # 抓取深层嵌套的点击区块
+                    if challenge.children:
+                        challenge_btn = challenge.children[0]
+                        if "display: none;" not in challenge_btn.attrs.get("style", ""):
+                            await asyncio.sleep(1)
+                            await challenge_btn.mouse_click()
+                            print("    🖱️ [先遣部队] 检测到复选框，已使用底层电信号完成穿透点击。")
+            except Exception:
+                pass
+            
+            await asyncio.sleep(1.5)
+            
+        return ua, final_cookies
+    except Exception as e:
+        print(f"    ❌ [先遣部队] 执行任务遭遇异常: {e}")
+        return ua, []
+    finally:
+        await driver.stop()
+
+# ==========================================
+# 3. 单账号处理流水线
 # ==========================================
 def process_single_account(username, password):
     print(f"\n==========================================")
@@ -198,114 +134,62 @@ def process_single_account(username, password):
     
     env_proxy = os.environ.get("HTTP_PROXY")
     
-    # 准备一套正常的 Windows 浏览器身份，随机选一个套上
-    windows_user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edge/122.0.0.0"
-    ]
-    random_ua = random.choice(windows_user_agents)
+    # === 阶段一：先遣部队破盾 ===
+    try:
+        ua, cookies_list = asyncio.run(fetch_cf_clearance(CONFIG['target_url'], env_proxy))
+    except Exception as e:
+        print(f"    ❌ 获取验证 Cookie 遇到系统错误：{e}")
+        return
+
+    # 检查战利品：如果没有拿到 clearance，说明 IP 被彻底列入了云端黑名单
+    if not any(c['name'] == 'cf_clearance' for c in cookies_list):
+        print("    ❌ 突破失败，未能拿到免死金牌。可能是该代理节点被 CF 彻底封杀，请更换 IP。跳过该账号。")
+        return
+        
+    print(f"\n>>> 🤖 [主力部队] 携带战利品 (Cookie) 启动业务主引擎...")
     
-    # 启动经过深度伪装的浏览器
+    # === 阶段二：主力部队执行业务 ===
+    # 启动 SeleniumBase，必须伪装得和先遣部队（Zendriver）一模一样，否则 Cookie 验证会失效
     with SB(
         uc=True,            
         test=True,          
-        locale="zh-CN",      # 假装是国内原生系统
+        locale="zh-CN",      
         headless=False,      
         proxy=env_proxy,    
-        chromium_arg=f"--disable-blink-features=AutomationControlled,--window-size=1920,1080,--user-agent={random_ua}"
+        chromium_arg=f"--disable-blink-features=AutomationControlled,--window-size=1920,1080,--user-agent={ua}"
     ) as sb:
         
-        # ---------------------------------------------------------------------
-        # 🛡️ 注入极客级防御：修改底层显卡和画布指纹，防止多账号被关联
-        # ---------------------------------------------------------------------
-        fingerprint_spoof_js = """
-        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
-        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); 
-        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });        
-
-        const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-        CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
-            const imageData = originalGetImageData.apply(this, arguments);
-            const len = imageData.data.length;
-            if (len >= 4) {
-                // 每次都悄悄改变最后一个像素的值，制造随机但真实的指纹噪音
-                imageData.data[len - 4] = imageData.data[len - 4] + (Math.random() > 0.5 ? 1 : -1);
-                imageData.data[len - 3] = imageData.data[len - 3] + (Math.random() > 0.5 ? 1 : -1); 
-                imageData.data[len - 2] = imageData.data[len - 2] + (Math.random() > 0.5 ? 1 : -1); 
-            }
-            return imageData;
-        };
-
-        const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(p) {
-            if (p === 37445) return 'Google Inc. (NVIDIA)'; 
-            if (p === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'; 
-            return originalGetParameter.apply(this, arguments);
-        };
-        """
-        sb.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": fingerprint_spoof_js})
-        print("    🛡️ [高级防护] 底层 Canvas 动态混淆和独立显卡指纹伪装已顺利挂载！")
+        # 为了种入拿到手的 Cookie，必须先访问该域名下一个不存在的页面（404页）建立信任环境
+        parsed_url = urlparse(CONFIG['target_url'])
+        domain = parsed_url.netloc
+        setup_url = f"https://{domain}/404_setup_cookies_page"
+        sb.driver.get(setup_url)
         
-        print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
-        sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
+        # 将先遣部队拿到的所有 Cookie 完整注射到当前的业务浏览器中
+        for cookie in cookies_list:
+            try:
+                c_dict = {'name': cookie['name'], 'value': cookie['value'], 'domain': cookie['domain']}
+                if 'path' in cookie: c_dict['path'] = cookie['path']
+                if 'secure' in cookie: c_dict['secure'] = cookie['secure']
+                sb.driver.add_cookie(c_dict)
+            except Exception:
+                pass
+                
+        print("    🍪 已成功向业务引擎注入全套凭据！开始全自动奔放操作...")
+        
+        # 此时再访问登录页，CF 防火墙将完全隐形，直接加载最终页面
+        sb.open(CONFIG['target_url'])
         time.sleep(4)
-        
         take_screenshot(sb, "01_初始访问页面", username)
 
-        page_source = sb.get_page_source()
-        if "Error 1005" in page_source or "Access denied" in page_source:
-            print("🚨 致命错误：当前代理节点的 IP 被彻底封锁 (Error 1005)！")
-            take_screenshot(sb, "Error_1005_节点被封锁", username)
-            return
-
-        # ---------------------------------------------------------------------
-        # 过盾判定环节
-        # ---------------------------------------------------------------------
-        cf_blocked = is_cloudflare_interstitial(sb)
-        if cf_blocked:
-            if bypass_cloudflare_interstitial(sb):
-                print("    ✅ CF 首次绕过成功。")
-            else:
-                print("    ❌ 首次绕过 CF 失败，等待 5 秒后重试登录流程...")
-                time.sleep(5)
-                sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
-                time.sleep(4)
-
-                if is_cloudflare_interstitial(sb):
-                    if not bypass_cloudflare_interstitial(sb):
-                        print("    ❌ 重试后仍然无法绕过 Cloudflare，跳过当前账号。")
-                        take_screenshot(sb, "CF_绕过失败跳过账号", username)
-                        return  
-                    else:
-                        print("    ✅ 重试后 CF 已放行。")
-                else:
-                    print("    ✅ 重试后未检测到 CF 阻挡，可以继续。")
-        else:
-            print("    🟢 未检测到 CF 5秒盾。")
-
-        # ---------------------------------------------------------------------
-        # 拦截保护：如果卡在验证码进不去，安全撤退，不再死等崩溃
-        # ---------------------------------------------------------------------
-        if not handle_turnstile_verification(sb):
-            print("    ❌ 无法绕过 Cloudflare 验证，跳过当前账号的后续任务。")
-            take_screenshot(sb, "CF_彻底拦截失败", username)
-            return  
-            
-        time.sleep(2)
-        take_screenshot(sb, "2_准备填写表单", username)
-
         try:
-            # ---------------------------------------------------------------------
-            # 登录模块 (智能识图)
-            # ---------------------------------------------------------------------
+            # --- 登录模块 ---
             login_success = False 
             for login_attempt in range(2):
                 print(f"    ▶ 开始第 {login_attempt + 1} 次尝试登录...")
                 captcha_success = False 
                 
+                # 图像识别重试逻辑
                 for captcha_attempt in range(10):
                     sb.wait_for_element(CONFIG['captcha_img_selector'], timeout=10)
                     img_src = sb.get_attribute(CONFIG['captcha_img_selector'], "src")
@@ -317,57 +201,51 @@ def process_single_account(username, password):
                         captcha_text = ocr.classification(img_bytes)
                         
                         if captcha_text.isdigit():
-                            print(f"      ✅ 验证码识别成功 (纯数字): {captcha_text}")
+                            print(f"      ✅ 验证码识别成功: {captcha_text}")
                             captcha_success = True
                             break
                         else:
-                            print(f"      ⚠️ 第 {captcha_attempt + 1} 次识别结果含字母/乱码 ({captcha_text})，点击刷新...")
+                            print(f"      ⚠️ 识别结果含字母/乱码 ({captcha_text})，点击刷新重试...")
                             sb.click(CONFIG['captcha_img_selector'])
                             time.sleep(2)
                     else:
-                        print("      ⚠️ 无法获取验证码图片。")
                         break
                 
                 if not captcha_success:
-                    print("    🚨 致命错误：验证码连续 10 次识别失败！程序将退出当前账号。")
+                    print("    🚨 致命错误：验证码连续识别失败。")
                     return
 
-                # 输入信息并提交
+                # 表单自动填充与提交流程
                 sb.clear(CONFIG['username_selector'])
                 sb.type(CONFIG['username_selector'], username)
-                
                 sb.clear(CONFIG['password_selector'])
                 sb.type(CONFIG['password_selector'], password)
-                
                 sb.clear(CONFIG['captcha_input_selector'])
                 sb.type(CONFIG['captcha_input_selector'], captcha_text)
-                
                 sb.click(CONFIG['login_btn_selector'])
                 time.sleep(5)
                 
+                # 校验是否成功进入仪表盘
                 if sb.is_element_present(CONFIG['user_center_selector']):
                     login_success = True
-                    print(f"    📄 登录验证成功！当前页面: {sb.get_title()}")
+                    print(f"    📄 登录成功！")
                     break 
                 else:
-                    print(f"    ⚠️ 第 {login_attempt + 1} 次登录似乎失败了（没找到用户中心），正在准备重试...")
+                    print(f"    ⚠️ 登录可能失败，准备重试...")
                     sb.refresh() 
                     time.sleep(3)
             
             if not login_success:
-                print("    ❌ 两次登录尝试均未成功，跳过当前账号的后续任务。")
+                print("    ❌ 彻底登录失败，放弃当前账号。")
                 return 
 
-            # ---------------------------------------------------------------------
-            # 每日签到与自动算术模块
-            # ---------------------------------------------------------------------
+            # --- 签到赚积分模块 ---
             print("\n>>> 🎁 准备执行每日签到任务...")
             sb.open(CONFIG['sign_in_url'])
             time.sleep(4) 
             
             balance_value = 0.0 
-            max_retries = 5
-            for attempt in range(max_retries):
+            for attempt in range(5):
                 sb.click(CONFIG['sign_in_btn_selector'])
                 time.sleep(2) 
                 
@@ -381,71 +259,56 @@ def process_single_account(username, password):
                     continue     
                 
                 final_answer = int(result) 
-                print(f"    ✅ 计算结果为整数: {final_answer}，正在提交...")
+                print(f"    ✅ 算术计算完毕: {final_answer}，正在提交...")
                 
                 sb.clear(CONFIG['math_input_selector']) 
                 sb.type(CONFIG['math_input_selector'], str(final_answer))
                 sb.click(CONFIG['verify_btn_selector'])
                 
                 sb.wait_for_element(CONFIG['popup_content_selector'], timeout=5)
-                popup_msg = sb.get_text(CONFIG['popup_content_selector'])
-                print(f"    🔔 签到系统提示: 【{popup_msg}】")
+                print(f"    🔔 签到提示: 【{sb.get_text(CONFIG['popup_content_selector'])}】")
                 
                 sb.click(CONFIG['popup_confirm_btn_selector'])
                 time.sleep(2) 
-                
-                print("    🔄 正在强制刷新页面以同步最新的余额数据...")
                 sb.refresh()
                 time.sleep(4)
                 
                 try:
                     balance_text = sb.get_text(CONFIG['points_balance_selector'])
-                    print(f"    💰 当前账户原始信息: {balance_text}")
                     match = re.search(r"(\d+(?:\.\d+)?)", balance_text)
                     if match:
                         balance_value = float(match.group(1))
-                        print(f"    🔍 提取并转换可用积分为: {balance_value}")
+                        print(f"    💰 当前可用积分: {balance_value}")
                 except Exception:
-                    print("    ⚠️ 无法获取积分余额。")
-
-                print("    🎉 签到流程结束。\n")
+                    pass
                 break 
-            else:
-                print("    ❌ 签到失败：连续 5 次刷新都没有遇到可以整除的算术题。")
 
-            # ---------------------------------------------------------------------
-            # 积分判断与云服务器续费
-            # ---------------------------------------------------------------------
+            # --- 云服务器自动续费模块 ---
             if balance_value > 0.25:
-                print(f">>> 💻 积分达标 (当前 {balance_value})，开始执行云服务器续费任务...")
-                print("    ▶ 正在强制跳转至云服务器列表网址...")
+                print(f">>> 💻 积分达标，执行自动续费...")
                 sb.open(CONFIG['server_list_url'])
                 time.sleep(4) 
                 take_screenshot(sb, "8_云服务器列表页", username)
                 
                 if sb.is_element_present(CONFIG['server_checkbox_selector']):
                     sb.click(CONFIG['server_checkbox_selector'])
-                    print("    ▶ 已勾选目标云服务器。")
-                    
                     sb.js_click(CONFIG['list_renew_btn_selector'])
                     time.sleep(4) 
                     
-                    print("    ▶ 正在生成续费订单...")
                     sb.wait_for_element_visible(CONFIG['confirm_renew_btn_selector'], timeout=10)
                     sb.scroll_to(CONFIG['confirm_renew_btn_selector'])
                     sb.click(CONFIG['confirm_renew_btn_selector'])   
                     time.sleep(5) 
                     
-                    print("    ▶ 已调起支付面板，等待确认...")
                     sb.wait_for_element(CONFIG['order_pay_btn_selector'], timeout=15)
                     sb.js_click(CONFIG['order_pay_btn_selector']) 
                     
                     sb.wait_for_element(CONFIG['modal_pay_btn_selector'], timeout=10)
                     sb.js_click(CONFIG['modal_pay_btn_selector']) 
-                    print("    ▶ 💸 已在弹窗中确认支付，正在等待系统处理并跳转...")
+                    print("    ▶ 💸 支付确认完成，等待系统处理...")
                     
                     time.sleep(8) 
-                    take_screenshot(sb, "12_支付完成跳转详情页", username)
+                    take_screenshot(sb, "12_支付完成跳转", username)
                     
                     try:
                         p_elements = sb.find_elements('section.text-gray p')
@@ -455,51 +318,35 @@ def process_single_account(username, password):
                                 break
                     except Exception:
                         pass
-                    
-                    print("\n>>> 🔄 续费完成，返回签到中心查看最新积分...")
-                    sb.open(CONFIG['sign_in_url'])
-                    time.sleep(4)
-                    take_screenshot(sb, "13_续费后返回签到中心", username)
-                    
-                    try:
-                        final_balance_text = sb.get_text(CONFIG['points_balance_selector'])
-                        print(f"    💰 续费后账户最新信息: {final_balance_text}")
-                        match = re.search(r"(\d+(?:\.\d+)?)", final_balance_text)
-                        if match:
-                            print(f"    ✨ 最终剩余可用积分: {float(match.group(1))}")
-                    except Exception:
-                        print("    ⚠️ 无法获取最终积分余额。")
                 else:
-                    print("    ⚠️ 当前账号下未检测到可续费的云服务器，已跳过。")
+                    print("    ⚠️ 当前账号未检测到可续费产品。")
             else:
-                print(f">>> 🛑 积分不足 (当前 {balance_value} <= 0.25)，安全退出当前账号的后续操作！")
+                print(f">>> 🛑 积分不足 (当前 {balance_value})，安全结束。")
 
         except Exception as e:
-            print(f"    ❌ 账号处理或执行过程中出现错误: {e}")
-            take_screenshot(sb, "Error_程序崩溃截图", username)
+            print(f"    ❌ 业务执行崩溃: {e}")
+            take_screenshot(sb, "Error_业务报错", username)
 
 # ==========================================
-# 4. 引擎启动区
+# 4. 主程序入口
 # ==========================================
 def main():
-    print("🚀 自动化任务启动...")
+    print("🚀 自动化任务启动 (双引擎破盾架构)...")
     accounts_str = os.environ.get("acount")
     if not accounts_str:
         print("⚠️ 未获取到名为 'acount' 环境变量！")
         return
 
     account_list = accounts_str.split(',')
-    print(f"📋 共检测到 {len(account_list)} 个账号。")
+    print(f"📋 共检测到 {len(account_list)} 个待处理账号。")
     
     for item in account_list:
         item = item.strip()
         if ':' in item:
             parts = item.split(':', 1) 
-            username = parts[0].strip()
-            password = parts[1].strip()
-            process_single_account(username, password)
+            process_single_account(parts[0].strip(), parts[1].strip())
             
-    print("\n🏁 所有队列任务已全部执行完成！")
+    print("\n🏁 所有列队任务执行完毕！")
 
 if __name__ == "__main__":
     main()
