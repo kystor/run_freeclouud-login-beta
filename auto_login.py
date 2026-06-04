@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
 import time
 import os
 import base64
 import sys
 import re  
+import random
 from seleniumbase import SB
 import ddddocr
 
@@ -158,14 +160,63 @@ def process_single_account(username, password):
     
     env_proxy = os.environ.get("HTTP_PROXY")
     
+    # 动态构建一组真实正常的 Windows Edge/Chrome 混合用户代理，防止多账号具有相同 UA 产生关联
+    windows_user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edge/122.0.0.0"
+    ]
+    random_ua = random.choice(windows_user_agents)
+    
     with SB(
         uc=True,            
         test=True,          
-        locale="en",        
+        locale="zh-CN",      # 强制调成中文环境，和国内住宅/公共节点代理相契合
         headless=False,      
         proxy=env_proxy,    
-        chromium_arg="--disable-blink-features=AutomationControlled,--window-size=1920,1080"
+        chromium_arg=f"--disable-blink-features=AutomationControlled,--window-size=1920,1080,--user-agent={random_ua}"
     ) as sb:
+        
+        # =====================================================================
+        # 🌟 【核心注入】深度重写浏览器底层 JS 属性，抹除一切自动化与 Linux 虚机痕迹
+        # =====================================================================
+        fingerprint_spoof_js = """
+        // (A) 锁死基础设备特征为 Windows 10
+        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh'] });
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); // 假装是8核CPU
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });        // 假装是8G物理内存
+
+        // (B) 注入 Brave 的 Canvas 防追踪逻辑：每次调用都会注入细微的像素级干扰噪音
+        const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+        CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
+            const imageData = originalGetImageData.apply(this, arguments);
+            const len = imageData.data.length;
+            if (len >= 4) {
+                // 修改画布最末端边缘的一个像素点颜色，这不影响任何主体图像（如验证码识别截图），却能令 Canvas 产生的 Hash 全新发生改变
+                imageData.data[len - 4] = imageData.data[len - 4] + (Math.random() > 0.5 ? 1 : -1); // 红通道
+                imageData.data[len - 3] = imageData.data[len - 3] + (Math.random() > 0.5 ? 1 : -1); // 绿通道
+                imageData.data[len - 2] = imageData.data[len - 2] + (Math.random() > 0.5 ? 1 : -1); // 蓝通道
+            }
+            return imageData;
+        };
+
+        // (C) 改写 WebGL 指纹常数，将 Linux 专用的 Mesa/SwiftShader 虚拟显卡隐蔽，变更为高端台式独立显卡
+        const originalGetParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(p) {
+            if (p === 37445) return 'Google Inc. (NVIDIA)'; // UNMASKED_VENDOR_WEBGL
+            if (p === 37446) return 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)'; // UNMASKED_RENDERER_WEBGL
+            return originalGetParameter.apply(this, arguments);
+        };
+        """
+        
+        # 利用 SeleniumBase 的底层 driver 的 CDP 功能挂载该指令。
+        # 此指令的作用是：只要遇到任何新网页（或重定向、刷新），在页面加载最前线率先注入并执行上面的 JS。
+        sb.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": fingerprint_spoof_js})
+        print("    🛡️ [高级防护] 底层 Canvas 动态混淆和独立显卡指纹伪装已顺利挂载！")
+        # =====================================================================
+
         print(f"🌐 正在访问目标网站: {CONFIG['target_url']}")
         sb.uc_open_with_reconnect(CONFIG['target_url'], reconnect_time=8)
         time.sleep(4)
@@ -193,7 +244,7 @@ def process_single_account(username, password):
                     if not bypass_cloudflare_interstitial(sb):
                         print("    ❌ 重试后仍然无法绕过 Cloudflare，跳过当前账号。")
                         take_screenshot(sb, "CF_绕过失败跳过账号", username)
-                        return  # 跳过当前账号，继续下一个
+                        return  
                     else:
                         print("    ✅ 重试后 CF 已放行。")
                 else:
@@ -202,19 +253,14 @@ def process_single_account(username, password):
             print("    🟢 未检测到 CF 5秒盾。")
         # =================================================================
 
-        # 处理可能出现的 Turnstile 验证
         handle_turnstile_verification(sb)
         time.sleep(3)
         take_screenshot(sb, "2_准备填写表单", username)
 
         try:
-            # --- 登录模块 ---
             login_success = False 
-            
             for login_attempt in range(2):
                 print(f"    ▶ 开始第 {login_attempt + 1} 次尝试登录...")
-                
-                # 验证码最多尝试 10 次，全部失败则退出程序
                 captcha_success = False 
                 
                 for captcha_attempt in range(10):
@@ -276,7 +322,6 @@ def process_single_account(username, password):
             time.sleep(4) 
             
             balance_value = 0.0 
-            
             max_retries = 5
             for attempt in range(max_retries):
                 sb.click(CONFIG['sign_in_btn_selector'])
@@ -330,7 +375,6 @@ def process_single_account(username, password):
             # ==========================================
             if balance_value > 0.25:
                 print(f">>> 💻 积分达标 (当前 {balance_value})，开始执行云服务器续费任务...")
-                
                 print("    ▶ 正在强制跳转至云服务器列表网址...")
                 sb.open(CONFIG['server_list_url'])
                 time.sleep(4) 
@@ -344,10 +388,9 @@ def process_single_account(username, password):
                     time.sleep(4) 
                     
                     print("    ▶ 正在生成续费订单...")
-                    # 修改点：用真实点击替代 js_click，确保触发表单提交
                     sb.wait_for_element_visible(CONFIG['confirm_renew_btn_selector'], timeout=10)
                     sb.scroll_to(CONFIG['confirm_renew_btn_selector'])
-                    sb.click(CONFIG['confirm_renew_btn_selector'])   # ✅ 真实点击提交按钮
+                    sb.click(CONFIG['confirm_renew_btn_selector'])   
                     time.sleep(5) 
                     
                     print("    ▶ 已调起支付面板，等待确认...")
@@ -356,7 +399,7 @@ def process_single_account(username, password):
                     
                     sb.wait_for_element(CONFIG['modal_pay_btn_selector'], timeout=10)
                     sb.js_click(CONFIG['modal_pay_btn_selector']) 
-                    print("    ▶ 💸 已在弹窗中确认支付，正在等待系统处理并跳转...")
+                    print("    ▶ 💸 已在弹窗中确认支付，正在等待 system 处理并跳转...")
                     
                     time.sleep(8) 
                     take_screenshot(sb, "12_支付完成跳转详情页", username)
@@ -383,7 +426,6 @@ def process_single_account(username, password):
                             print(f"    ✨ 最终剩余可用积分: {float(match.group(1))}")
                     except Exception:
                         print("    ⚠️ 无法获取最终积分余额。")
-                        
                 else:
                     print("    ⚠️ 当前账号下未检测到可续费的云服务器，已跳过。")
             else:
@@ -399,7 +441,6 @@ def process_single_account(username, password):
 def main():
     print("🚀 自动化任务启动...")
     accounts_str = os.environ.get("acount")
-    
     if not accounts_str:
         print("⚠️ 未获取到名为 'acount' 环境变量！")
         return
@@ -414,8 +455,6 @@ def main():
             username = parts[0].strip()
             password = parts[1].strip()
             process_single_account(username, password)
-        else:
-            pass
             
     print("\n🏁 所有队列任务已全部执行完成！")
 
