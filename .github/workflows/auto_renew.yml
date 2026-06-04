@@ -1,4 +1,4 @@
-name: 多账号自动登录续期任务(高阶指纹伪装版)
+name: 多账号自动登录续期任务(双引擎接力版)
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: 获取代码仓库
@@ -20,17 +20,11 @@ jobs:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
+        # 引入了 zendriver 和最新 user_agent 库，去除了所有输出屏蔽，保持日志实时可见
         run: |
-          (
-            set -e
-            pip install seleniumbase ddddocr PyAutoGUI
-          ) > pip_install.log 2>&1 || {
-            echo "❌ 依赖安装失败，详细日志如下："
-            cat pip_install.log
-            exit 1
-          }
+          pip install seleniumbase ddddocr PyAutoGUI zendriver==0.15.3 latest_user_agents==0.0.5 user_agents==2.2.0
 
-      - name: 🚀 智能解析全协议节点并启动代理内核
+      - name: 智能解析全协议节点并启动代理内核
         env:
           PROXY: ${{ secrets.PROXY }}
           PY_SCRIPT: |
@@ -106,7 +100,6 @@ jobs:
                     if parsed.username:
                         server["users"] = [{"user": parsed.username, "pass": parsed.password or ""}]
                     outbound["settings"] = {"servers": [server]}
-
                 else:
                     print(f"❌ 暂不支持自动解析此协议: {link[:10]}...")
                     sys.exit(1)
@@ -114,7 +107,6 @@ jobs:
                 config["outbounds"].append(outbound)
                 with open("config.json", "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=2)
-                
             except Exception as e:
                 print(f"❌ 解析链接时发生致命错误: {e}")
                 sys.exit(1)
@@ -124,17 +116,12 @@ jobs:
               exit 1
           fi
 
-          # =====================================================================
-          # 🌟 【新增爆改点 1】自适应智能解密：自动识别并解码 Base64 加密的密文
-          # =====================================================================
           if [[ "$PROXY" != *"://"* ]]; then
               echo "🔄 检测到 PROXY 密文不含协议头，正在尝试进行 Base64 解码..."
-              # 自动计算并补齐 Base64 缺失的 '=' 尾巴，防止报错
               PAD_PROXY=$PROXY
               while [ $(( ${#PAD_PROXY} % 4 )) -ne 0 ]; do
                   PAD_PROXY="${PAD_PROXY}="
               done
-              # 执行解码操作
               DECODED=$(echo -n "$PAD_PROXY" | base64 -d 2>/dev/null || true)
               if [[ "$DECODED" == *"://"* ]]; then
                   PROXY="$DECODED"
@@ -144,24 +131,11 @@ jobs:
               fi
           fi
 
-          # =====================================================================
-          # 🌟 【新增爆改点 2】节点清洗：剪掉尾部的 # 别名后缀，防止干扰核心网络请求
-          # =====================================================================
           PROXY=$(echo "$PROXY" | cut -d'#' -f1)
 
-          # ==========================================
-          # 分支 1：处理 Hysteria2 协议 (hy2:// 或 hysteria2://)
-          # ==========================================
           if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
-              (
-                set -e
-                wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
-                chmod +x hysteria
-              ) > hysteria_setup.log 2>&1 || {
-                echo "❌ Hysteria 下载失败，详细日志如下："
-                cat hysteria_setup.log
-                exit 1
-              }
+              wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
+              chmod +x hysteria
               
               AUTH=$(echo "$PROXY" | sed -n 's|.*://\([^@]*\)@.*|\1|p' || true)
               SERVER=$(echo "$PROXY" | sed -n 's|.*@\([^/?#]*\).*|\1|p' || true)
@@ -180,33 +154,15 @@ jobs:
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
               sleep 5
               
-          # ==========================================
-          # 🌟 【新增爆改点 3】分支 2：处理原生 SOCKS5 / SOCKS 协议直连（规范化升级）
-          # ==========================================
           elif [[ "$PROXY" == socks5://* ]] || [[ "$PROXY" == socks://* ]]; then
               echo "⚡ [智能识别] 检测到您使用的是原生 SOCKS 代理直连链路！"
-              
-              # 核心清洗：利用 sed 强制把 socks:// 自动标准化升级写为 socks5://
               FINAL_SOCKS_PROXY=$(echo "$PROXY" | sed 's|^socks://|socks5://|')
-              
-              # 将处理完毕的纯净规范链接存入全局环境变量
               echo "FINAL_PROXY=$FINAL_SOCKS_PROXY" >> $GITHUB_ENV
               echo "✅ 原生 SOCKS5 链路清洗并格式化完成！"
-
-          # ==========================================
-          # 分支 3：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
-          # ==========================================
           else
-              (
-                set -e
-                wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-                unzip Xray-linux-64.zip -x README.md
-                chmod +x xray
-              ) > xray_setup.log 2>&1 || {
-                echo "❌ Xray 下载或解压失败，详细日志如下："
-                cat xray_setup.log
-                exit 1
-              }
+              wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+              unzip Xray-linux-64.zip -x README.md
+              chmod +x xray
               
               printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
               python -u parse_proxy.py
@@ -216,41 +172,22 @@ jobs:
               sleep 5
           fi
 
-      - name: 运行自动化脚本 (指纹环境深度整合版)
+      - name: 安装虚拟屏幕与指纹依赖
+        # 去除错误日志屏蔽，所有运行时的输出将完整暴露在工作流控制台中
+        run: |
+          sudo apt-get update
+          echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
+          sudo apt-get install -y xvfb fonts-noto-cjk ttf-mscorefonts-installer libxss1 libxi6 libgstreamer1.0-0 libnss3 libatk-bridge2.0-0 libgtk-3-0
+
+      - name: 运行双引擎自动化脚本
         env:
           acount: ${{ secrets.ACOUNT }}
           HTTP_PROXY: ${{ env.FINAL_PROXY }}
           HTTPS_PROXY: ${{ env.FINAL_PROXY }}
           NO_PROXY: localhost,127.0.0.1,::1
+        # 添加 -u 参数确保 Python 无缓冲实时打印日志，防止卡平时看不到输出
         run: |
-          (
-            set -e
-            curl -sS -x "$HTTP_PROXY" -I https://www.baidu.com --connect-timeout 10
-          ) > curl_test.log 2>&1 || { 
-            echo "❌ 代理连接失败！为您提取底层日志："; 
-            echo "================ 代理核心运行日志 ================";
-            if [ -f proxy.log ]; then
-              cat proxy.log
-            else
-              echo "当前处于 [原生 SOCKS5 直连模式]，未启动任何本地内核。"
-              echo "请检查你在 GitHub Secrets 中配置的 PROXY 密文是否正确、Base64 编码前的数据是否失效。"
-              echo "当前尝试直连的清洗后节点为: $HTTP_PROXY"
-            fi
-            echo "====================================================";
-            exit 1; 
-          }
-          
-          (
-            set -e
-            sudo apt-get update
-            echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
-            sudo apt-get install -y xvfb fonts-noto-cjk ttf-mscorefonts-installer libxss1 libxi6 libgstreamer1.0-0 libnss3 libatk-bridge2.0-0 libgtk-3-0
-          ) > apt_install.log 2>&1 || {
-            echo "❌ 虚拟物理指纹库与字体安装失败，详细日志如下："
-            cat apt_install.log
-            exit 1
-          }
-          
+          curl -sS -x "$HTTP_PROXY" -I https://www.baidu.com --connect-timeout 10
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
 
       - name: 上传运行过程截图与日志文件
