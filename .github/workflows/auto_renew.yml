@@ -175,18 +175,13 @@ jobs:
       - name: 运行双引擎自动化脚本
         env:
           acount: ${{ secrets.ACOUNT }}
-          HTTP_PROXY: ${{ env.FINAL_PROXY }}
-          HTTPS_PROXY: ${{ env.FINAL_PROXY }}
-          NO_PROXY: localhost,127.0.0.1,::1
+          # 🌟 【核心修复点】将原本的 HTTP_PROXY 改名为自定义的 MY_PROXY，防止劫持 Python 内部流量
+          MY_PROXY: ${{ env.FINAL_PROXY }}
         run: |
           echo ">>> [网络] 正在探测代理节点是否可用..."
-          
-          # 【修改点 1】: 更换测试网址为 cloudflare.com，把 socks5 改成 socks5h 强制远程解析 DNS。
-          # 【修改点 2】: 去掉了导致闪退的 set -e。现在即使 curl 失败了，也会宽容放行，交给下面强大的浏览器去连接。
-          curl -sS -x socks5h://127.0.0.1:10808 -I https://www.cloudflare.com/cdn-cgi/trace --connect-timeout 10 > curl_test.log 2>&1 || {
-            echo "⚠️ 代理测试未能成功 (curl 退出码: $?)，日志如下："
+          curl -sS -x "$MY_PROXY" -I https://www.cloudflare.com/cdn-cgi/trace --connect-timeout 10 > curl_test.log 2>&1 || {
+            echo "⚠️ 代理测试未能成功，日志如下："
             cat curl_test.log
-            echo "⚠️ 提示: 这可能是因为节点禁止了纯 IP 探测或限制了请求域，又或者该家庭宽带暂时拥堵。"
             echo "⚠️ 脚本将忽略此警告，强行启动浏览器进行尝试..."
           }
           
