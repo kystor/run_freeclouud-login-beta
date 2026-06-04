@@ -100,7 +100,6 @@ jobs:
                             outbound["streamSettings"]["realitySettings"] = {"publicKey": qs.get("pbk", [""])[0], "shortId": qs.get("sid", [""])[0], "fingerprint": qs.get("fp", ["chrome"])[0]}
 
                 elif link.startswith("socks5://") or link.startswith("socks://"):
-                    # 如果 Python 脚本被意外触发，也支持解析
                     outbound["protocol"] = "socks"
                     parsed = urlparse(link)
                     server = {"address": parsed.hostname, "port": parsed.port or 1080}
@@ -124,6 +123,31 @@ jobs:
               echo "❌ 错误：环境变量 PROXY 为空！"
               exit 1
           fi
+
+          # =====================================================================
+          # 🌟 【新增爆改点 1】自适应智能解密：自动识别并解码 Base64 加密的密文
+          # =====================================================================
+          if [[ "$PROXY" != *"://"* ]]; then
+              echo "🔄 检测到 PROXY 密文不含协议头，正在尝试进行 Base64 解码..."
+              # 自动计算并补齐 Base64 缺失的 '=' 尾巴，防止报错
+              PAD_PROXY=$PROXY
+              while [ $(( ${#PAD_PROXY} % 4 )) -ne 0 ]; do
+                  PAD_PROXY="${PAD_PROXY}="
+              done
+              # 执行解码操作
+              DECODED=$(echo -n "$PAD_PROXY" | base64 -d 2>/dev/null || true)
+              if [[ "$DECODED" == *"://"* ]]; then
+                  PROXY="$DECODED"
+                  echo "✅ Base64 解码成功！"
+              else
+                  echo "⚠️ Base64 解码未识别到有效协议，将维持原样字符串。"
+              fi
+          fi
+
+          # =====================================================================
+          # 🌟 【新增爆改点 2】节点清洗：剪掉尾部的 # 别名后缀，防止干扰核心网络请求
+          # =====================================================================
+          PROXY=$(echo "$PROXY" | cut -d'#' -f1)
 
           # ==========================================
           # 分支 1：处理 Hysteria2 协议 (hy2:// 或 hysteria2://)
@@ -151,22 +175,23 @@ jobs:
               echo "socks5:" >> config.yaml
               echo "  listen: 127.0.0.1:10808" >> config.yaml
               
-              # 写入全局变量：告知下一步使用本地转发端口
               echo "FINAL_PROXY=socks5://127.0.0.1:10808" >> $GITHUB_ENV
               echo "✅ 成功配置 Hysteria2 本地内核！"
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
               sleep 5
               
           # ==========================================
-          # 🌟 【新增爆改点】分支 2：处理原生 SOCKS5 协议直连
+          # 🌟 【新增爆改点 3】分支 2：处理原生 SOCKS5 / SOCKS 协议直连（规范化升级）
           # ==========================================
           elif [[ "$PROXY" == socks5://* ]] || [[ "$PROXY" == socks://* ]]; then
-              echo "⚡ [智能识别] 检测到您填写的是原生 SOCKS5 代理链接！"
-              echo "⚡ 无需下载任何外部代理内核，脚本将直接对接远程节点。"
+              echo "⚡ [智能识别] 检测到您使用的是原生 SOCKS 代理直连链路！"
               
-              # 直接将用户的远程 SOCKS5 节点写入 GitHub 环境变量，完全跳过本地内核
-              echo "FINAL_PROXY=$PROXY" >> $GITHUB_ENV
-              echo "✅ 原生 SOCKS5 链路准备就绪！"
+              # 核心清洗：利用 sed 强制把 socks:// 自动标准化升级写为 socks5://
+              FINAL_SOCKS_PROXY=$(echo "$PROXY" | sed 's|^socks://|socks5://|')
+              
+              # 将处理完毕的纯净规范链接存入全局环境变量
+              echo "FINAL_PROXY=$FINAL_SOCKS_PROXY" >> $GITHUB_ENV
+              echo "✅ 原生 SOCKS5 链路清洗并格式化完成！"
 
           # ==========================================
           # 分支 3：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
@@ -186,7 +211,6 @@ jobs:
               printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
               python -u parse_proxy.py
               
-              # 写入全局变量：告知下一步使用本地转发端口
               echo "FINAL_PROXY=socks5://127.0.0.1:10808" >> $GITHUB_ENV
               nohup ./xray run -c config.json > proxy.log 2>&1 &
               sleep 5
@@ -195,14 +219,12 @@ jobs:
       - name: 运行自动化脚本 (指纹环境深度整合版)
         env:
           acount: ${{ secrets.ACOUNT }}
-          # 🌟 动态读取上一步判断出来的最佳代理方案（如果是原生 socks5 就会直接用它）
           HTTP_PROXY: ${{ env.FINAL_PROXY }}
           HTTPS_PROXY: ${{ env.FINAL_PROXY }}
           NO_PROXY: localhost,127.0.0.1,::1
         run: |
           (
             set -e
-            # 动态检测当前代理网络连通性
             curl -sS -x "$HTTP_PROXY" -I https://www.baidu.com --connect-timeout 10
           ) > curl_test.log 2>&1 || { 
             echo "❌ 代理连接失败！为您提取底层日志："; 
@@ -211,8 +233,8 @@ jobs:
               cat proxy.log
             else
               echo "当前处于 [原生 SOCKS5 直连模式]，未启动任何本地内核。"
-              echo "请检查你在 GitHub Secrets 中配置的 PROXY 节点是否在线、账户密码或端口是否正确。"
-              echo "当前尝试连接的节点为: $HTTP_PROXY"
+              echo "请检查你在 GitHub Secrets 中配置的 PROXY 密文是否正确、Base64 编码前的数据是否失效。"
+              echo "当前尝试直连的清洗后节点为: $HTTP_PROXY"
             fi
             echo "====================================================";
             exit 1; 
