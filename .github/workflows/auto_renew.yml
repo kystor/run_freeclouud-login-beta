@@ -1,4 +1,4 @@
-name: 多账号自动登录续期任务(双引擎接力版)
+name: 多账号自动登录续期任务(双引擎破盾版)
 
 on:
   schedule:
@@ -20,11 +20,10 @@ jobs:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
-        # 引入了 zendriver 和最新 user_agent 库，去除了所有输出屏蔽，保持日志实时可见
         run: |
           pip install seleniumbase ddddocr PyAutoGUI zendriver==0.15.3 latest_user_agents==0.0.5 user_agents==2.2.0
 
-      - name: 智能解析全协议节点并启动代理内核
+      - name: 🚀 智能解析全协议节点并启动代理内核
         env:
           PROXY: ${{ secrets.PROXY }}
           PY_SCRIPT: |
@@ -126,8 +125,6 @@ jobs:
               if [[ "$DECODED" == *"://"* ]]; then
                   PROXY="$DECODED"
                   echo "✅ Base64 解码成功！"
-              else
-                  echo "⚠️ Base64 解码未识别到有效协议，将维持原样字符串。"
               fi
           fi
 
@@ -154,12 +151,8 @@ jobs:
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
               sleep 5
               
-          elif [[ "$PROXY" == socks5://* ]] || [[ "$PROXY" == socks://* ]]; then
-              echo "⚡ [智能识别] 检测到您使用的是原生 SOCKS 代理直连链路！"
-              FINAL_SOCKS_PROXY=$(echo "$PROXY" | sed 's|^socks://|socks5://|')
-              echo "FINAL_PROXY=$FINAL_SOCKS_PROXY" >> $GITHUB_ENV
-              echo "✅ 原生 SOCKS5 链路清洗并格式化完成！"
           else
+              echo "⚡ [智能识别] 将代理交由 Xray 统一解析与连接..."
               wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
               unzip Xray-linux-64.zip -x README.md
               chmod +x xray
@@ -173,7 +166,6 @@ jobs:
           fi
 
       - name: 安装虚拟屏幕与指纹依赖
-        # 去除错误日志屏蔽，所有运行时的输出将完整暴露在工作流控制台中
         run: |
           sudo apt-get update
           echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
@@ -185,7 +177,6 @@ jobs:
           HTTP_PROXY: ${{ env.FINAL_PROXY }}
           HTTPS_PROXY: ${{ env.FINAL_PROXY }}
           NO_PROXY: localhost,127.0.0.1,::1
-        # 添加 -u 参数确保 Python 无缓冲实时打印日志，防止卡平时看不到输出
         run: |
           curl -sS -x "$HTTP_PROXY" -I https://www.baidu.com --connect-timeout 10
           xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
