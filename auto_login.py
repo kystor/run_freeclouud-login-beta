@@ -87,7 +87,6 @@ async def fetch_cf_clearance(target_url, proxy_url):
     config.add_argument("--disable-gpu")
     
     if proxy_url:
-        # 防呆设计：如果传入的代理包含用户名/密码，强行裁剪掉，防止底层 Chrome 报错 ERR_NO_SUPPORTED_PROXIES
         parsed_proxy = urlparse(proxy_url)
         safe_proxy = f"{parsed_proxy.scheme}://{parsed_proxy.hostname}"
         if parsed_proxy.port:
@@ -184,7 +183,8 @@ def process_single_account(username, password):
     print(f"➡️ 开始处理账号: {username}")
     print(f"==========================================")
     
-    env_proxy = os.environ.get("HTTP_PROXY")
+    # 🌟 【核心修复点】读取我们刚刚在 YAML 中自定义的安全代理变量名称
+    env_proxy = os.environ.get("MY_PROXY")
     
     try:
         ua, cookies_list = asyncio.run(fetch_cf_clearance(CONFIG['target_url'], env_proxy))
