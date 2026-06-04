@@ -89,10 +89,10 @@ async def fetch_cf_clearance(target_url, proxy_url):
     ua = get_chrome_user_agent()
     
     # 实例化配置对象，加入 no_sandbox=True 允许 root 权限运行
+    # ⚠️ 必须在这里直接设置沙盒参数，千万不要用 add_argument("--no-sandbox") 添加，否则会报错
     config = zendriver.Config(headless=False, no_sandbox=True)
     
     # 🛠️ 针对 GitHub Actions 虚拟机的专属环境优化参数
-    config.add_argument("--no-sandbox")               # 强行禁用沙盒模式，突破 root 权限限制
     config.add_argument("--disable-dev-shm-usage")    # 突破共享内存限制，防止浏览器因为内存不足崩溃闪退
     config.add_argument("--disable-gpu")              # 虚拟机没有显卡，禁用 GPU 加速
     config.add_argument(f"--user-agent={ua}")         # 穿上随机挑选的合法“身份证”
