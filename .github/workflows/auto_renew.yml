@@ -244,7 +244,7 @@ jobs:
             set -e
             sudo apt-get update
             echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
-            sudo apt-get install -y xvfb fonts-noto-cjk ttf-mscorefonts-installer libxss1 libappindicator1 libgconf-2-4 libxi6 libgstreamer1.0-0
+            sudo apt-get install -y xvfb fonts-noto-cjk ttf-mscorefonts-installer libxss1 libxi6 libgstreamer1.0-0 libnss3 libatk-bridge2.0-0 libgtk-3-0
           ) > apt_install.log 2>&1 || {
             echo "❌ 虚拟物理指纹库与字体安装失败，详细日志如下："
             cat apt_install.log
