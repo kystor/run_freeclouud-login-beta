@@ -21,7 +21,7 @@ from zendriver.core.element import Element
 from zendriver import cdp
 from zendriver.cdp.emulation import UserAgentBrandVersion, UserAgentMetadata
 import latest_user_agents
-import user_agents  # 用于解析并构造匹配的底层客户端指纹
+import user_agents  
 
 # ==============================================================================
 # 1. 网站配置与辅助功能区域
@@ -64,7 +64,7 @@ def take_screenshot(sb, step_name, username="system"):
         pass
 
 # ==============================================================================
-# 2. 【核心引擎】Zendriver 先遣破盾模块 (引入极客级指纹伪装)
+# 2. 【核心引擎】Zendriver 先遣破盾模块
 # ==============================================================================
 def get_chrome_user_agent():
     chrome_user_agents = [
@@ -87,16 +87,18 @@ async def fetch_cf_clearance(target_url, proxy_url):
     config.add_argument("--disable-gpu")
     
     if proxy_url:
-        config.add_argument(f"--proxy-server={proxy_url}")
+        # 防呆设计：如果传入的代理包含用户名/密码，强行裁剪掉，防止底层 Chrome 报错 ERR_NO_SUPPORTED_PROXIES
+        parsed_proxy = urlparse(proxy_url)
+        safe_proxy = f"{parsed_proxy.scheme}://{parsed_proxy.hostname}"
+        if parsed_proxy.port:
+            safe_proxy += f":{parsed_proxy.port}"
+        config.add_argument(f"--proxy-server={safe_proxy}")
     
     driver = zendriver.Browser(config)
     await driver.start()
     print(f"    🛡️ [先遣部队] 启动 Zendriver，正向目标进发...")
     
     try:
-        # =====================================================================
-        # 🌟 核心突破：注入极客级底层指纹 (Client Hints)，彻底欺骗 CF 探针
-        # =====================================================================
         parsed_ua = user_agents.parse(ua)
         metadata = UserAgentMetadata(
             architecture="x86",
@@ -113,13 +115,12 @@ async def fetch_cf_clearance(target_url, proxy_url):
             ],
             mobile=parsed_ua.is_mobile,
             model=parsed_ua.device.model or "",
-            platform=parsed_ua.os.family,      # <--- 核心伪装：向底层 API 报告我是 Windows，而不是 Linux
+            platform=parsed_ua.os.family,      
             platform_version=parsed_ua.os.version_string,
             full_version=parsed_ua.browser.version_string,
             wow64=False,
         )
         
-        # 使用 CDP 协议强行覆盖底层的网络探针回复
         driver.main_tab.feed_cdp(
             cdp.network.set_user_agent_override(ua, user_agent_metadata=metadata)
         )
@@ -148,7 +149,6 @@ async def fetch_cf_clearance(target_url, proxy_url):
                         if "display: none;" not in challenge_btn.attrs.get("style", ""):
                             await asyncio.sleep(1)
                             try:
-                                # 确保元素准备就绪后再发出点击电信号
                                 await challenge_btn.get_position()
                                 await challenge_btn.mouse_click()
                                 print("    🖱️ [先遣部队] 检测到隐藏复选框，已使用底层电信号完成穿透点击。")
@@ -160,7 +160,6 @@ async def fetch_cf_clearance(target_url, proxy_url):
             await asyncio.sleep(1.5)
             
         print("    ⚠️ [先遣部队] 45秒超时，未能拿到 Cookie，正在截取失败画面...")
-        # 📸 增加盲区视野：如果超时依然失败，截取当前虚拟机浏览器画面
         try:
             await driver.main_tab.save_screenshot("screenshots/zendriver_timeout_fail.png")
         except Exception:
