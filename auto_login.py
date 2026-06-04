@@ -2,61 +2,59 @@
 # ==============================================================================
 # 导入所需的各种模块
 # ==============================================================================
-import time            # 用于控制程序暂停、等待
-import os              # 用于读取系统环境变量（如账号、代理）和创建文件夹
-import base64          # 用于解码图片验证码的 Base64 数据
-import sys             # 用于控制程序退出
-import re              # 正则表达式，用于从文本中提取数字（如积分余额）
-import random          # 用于产生随机数，比如随机挑选浏览器身份
-import asyncio         # 异步框架，Zendriver 引擎运行必须依赖它
-from urllib.parse import urlparse  # 用于解析网址，提取域名
+import time
+import os
+import base64
+import sys
+import re  
+import random
+import asyncio
+from urllib.parse import urlparse
 
 # --- 主力业务引擎 ---
 from seleniumbase import SB
-import ddddocr         # 强大的本地离线验证码识别库
+import ddddocr
 
 # --- 先遣破盾引擎 (底层 CDP 协议) ---
 import zendriver
 from zendriver.core.element import Element
-import latest_user_agents  # 获取互联网上最新真实浏览器的身份列表
+from zendriver import cdp
+from zendriver.cdp.emulation import UserAgentBrandVersion, UserAgentMetadata
+import latest_user_agents
+import user_agents  # 用于解析并构造匹配的底层客户端指纹
 
 # ==============================================================================
 # 1. 网站配置与辅助功能区域
 # ==============================================================================
 CONFIG = {
-    "target_url": "https://run.freecloud.ltd/login",              # 登录网址
-    "username_selector": "#emailInp",                             # 账号输入框
-    "password_selector": "#emailPwdInp",                          # 密码输入框
-    "captcha_img_selector": "#allow_login_email_captcha",         # 验证码图片
-    "captcha_input_selector": "#captcha_allow_login_email_captcha",# 验证码输入框
-    "login_btn_selector": 'button[type="submit"]',                # 登录按钮
-    "user_center_selector": 'a[href="clientarea"]',               # 用户中心链接(用于判断是否登录成功)
+    "target_url": "https://run.freecloud.ltd/login",              
+    "username_selector": "#emailInp",                             
+    "password_selector": "#emailPwdInp",                          
+    "captcha_img_selector": "#allow_login_email_captcha",         
+    "captcha_input_selector": "#captcha_allow_login_email_captcha",
+    "login_btn_selector": 'button[type="submit"]',                
+    "user_center_selector": 'a[href="clientarea"]',               
     
-    "sign_in_url": 'https://run.freecloud.ltd/addons?_plugin=5&_controller=index&_action=index', # 签到网址
-    "sign_in_btn_selector": 'button[onclick="showMathVerification()"]', # 签到按钮
-    "math_question_selector": '#mathQuestion',                    # 算术题文本
-    "math_input_selector": '#userAnswer',                         # 算术题答案输入框
-    "verify_btn_selector": 'button[onclick="checkAnswer()"]',     # 提交答案按钮
-    "popup_content_selector": ".layui-layer-content",             # 弹窗提示内容
-    "popup_confirm_btn_selector": ".layui-layer-btn0",            # 弹窗确认按钮
-    "points_balance_selector": "div.alert-success span",          # 积分余额文本
+    "sign_in_url": 'https://run.freecloud.ltd/addons?_plugin=5&_controller=index&_action=index', 
+    "sign_in_btn_selector": 'button[onclick="showMathVerification()"]', 
+    "math_question_selector": '#mathQuestion',                    
+    "math_input_selector": '#userAnswer',                         
+    "verify_btn_selector": 'button[onclick="checkAnswer()"]',     
+    "popup_content_selector": ".layui-layer-content",             
+    "popup_confirm_btn_selector": ".layui-layer-btn0",            
+    "points_balance_selector": "div.alert-success span",          
     
-    "server_list_url": "https://run.freecloud.ltd/service?groupid=305", # 云服务器列表页
-    "server_checkbox_selector": '.row-checkbox',                  # 勾选云服务器的复选框
-    "list_renew_btn_selector": '#readBtn',                        # 列表页的续费按钮
-    "confirm_renew_btn_selector": '.xfSubmit',                    # 确认续费按钮
-    "order_pay_btn_selector": '#payamount',                       # 订单支付按钮
-    "modal_pay_btn_selector": 'button.pay-now'                    # 弹窗内的立即支付按钮
+    "server_list_url": "https://run.freecloud.ltd/service?groupid=305", 
+    "server_checkbox_selector": '.row-checkbox',                  
+    "list_renew_btn_selector": '#readBtn',                        
+    "confirm_renew_btn_selector": '.xfSubmit',                    
+    "order_pay_btn_selector": '#payamount',                       
+    "modal_pay_btn_selector": 'button.pay-now'                    
 }
 
-# 自动在当前目录下创建一个名为 screenshots 的文件夹，如果已存在则不报错
 os.makedirs("screenshots", exist_ok=True)
 
 def take_screenshot(sb, step_name, username="system"):
-    """
-    【截图辅助函数】
-    作用：将当前浏览器的实时画面保存下来。在没有显示器的 GitHub 虚拟机里，这是我们排错的唯一“眼睛”。
-    """
     safe_name = username.replace("@", "_").replace(".", "_")
     filepath = f"screenshots/{safe_name}_{step_name}.png"
     try:
@@ -66,7 +64,7 @@ def take_screenshot(sb, step_name, username="system"):
         pass
 
 # ==============================================================================
-# 2. 【核心引擎】Zendriver 先遣破盾模块
+# 2. 【核心引擎】Zendriver 先遣破盾模块 (引入极客级指纹伪装)
 # ==============================================================================
 def get_chrome_user_agent():
     chrome_user_agents = [
@@ -78,29 +76,54 @@ def get_chrome_user_agent():
 async def fetch_cf_clearance(target_url, proxy_url):
     ua = get_chrome_user_agent()
     
-    # ⚠️ 【超级避坑】这里是修复刚刚那个报错的最核心位置！
-    # 官方报错打印的 "pass no_sandbox=True" 是误导人的。
-    # 在 zendriver 的真实语法里，彻底关闭沙盒的属性名叫做 sandbox=False。
     config = zendriver.Config(
         headless=False, 
-        sandbox=False,                  # 【核心修复】这才是正确关闭沙盒的单词
-        browser_connection_timeout=5,   # GitHub 虚拟机每次起浏览器都很慢，把超时时间拉长到 5 秒
-        browser_connection_max_tries=20 # 允许它起步时失败重试 20 次，大幅增加成功率
+        sandbox=False,                  
+        browser_connection_timeout=5,   
+        browser_connection_max_tries=20 
     )
     
     config.add_argument("--disable-dev-shm-usage")
     config.add_argument("--disable-gpu")
-    config.add_argument(f"--user-agent={ua}")
     
     if proxy_url:
         config.add_argument(f"--proxy-server={proxy_url}")
     
     driver = zendriver.Browser(config)
     await driver.start()
-    
-    print(f"    🛡️ [先遣部队] 启动 Zendriver 底层 CDP 协议，正向目标进发...")
+    print(f"    🛡️ [先遣部队] 启动 Zendriver，正向目标进发...")
     
     try:
+        # =====================================================================
+        # 🌟 核心突破：注入极客级底层指纹 (Client Hints)，彻底欺骗 CF 探针
+        # =====================================================================
+        parsed_ua = user_agents.parse(ua)
+        metadata = UserAgentMetadata(
+            architecture="x86",
+            bitness="64",
+            brands=[
+                UserAgentBrandVersion(brand="Not)A;Brand", version="8"),
+                UserAgentBrandVersion(brand="Chromium", version=str(parsed_ua.browser.version[0])),
+                UserAgentBrandVersion(brand="Google Chrome", version=str(parsed_ua.browser.version[0])),
+            ],
+            full_version_list=[
+                UserAgentBrandVersion(brand="Not)A;Brand", version="8"),
+                UserAgentBrandVersion(brand="Chromium", version=str(parsed_ua.browser.version[0])),
+                UserAgentBrandVersion(brand="Google Chrome", version=str(parsed_ua.browser.version[0])),
+            ],
+            mobile=parsed_ua.is_mobile,
+            model=parsed_ua.device.model or "",
+            platform=parsed_ua.os.family,      # <--- 核心伪装：向底层 API 报告我是 Windows，而不是 Linux
+            platform_version=parsed_ua.os.version_string,
+            full_version=parsed_ua.browser.version_string,
+            wow64=False,
+        )
+        
+        # 使用 CDP 协议强行覆盖底层的网络探针回复
+        driver.main_tab.feed_cdp(
+            cdp.network.set_user_agent_override(ua, user_agent_metadata=metadata)
+        )
+        
         await driver.get(target_url)
         start_time = time.time()
         final_cookies = []
@@ -110,7 +133,7 @@ async def fetch_cf_clearance(target_url, proxy_url):
             final_cookies = [c.to_json() for c in cookies]
             if any(c["name"] == "cf_clearance" for c in final_cookies):
                 print("    ✅ [先遣部队] 破盾成功！已拿到 cf_clearance Cookie。")
-                break
+                return ua, final_cookies
             
             try:
                 widget_input = await driver.main_tab.find("input")
@@ -124,16 +147,32 @@ async def fetch_cf_clearance(target_url, proxy_url):
                         challenge_btn = challenge.children[0]
                         if "display: none;" not in challenge_btn.attrs.get("style", ""):
                             await asyncio.sleep(1)
-                            await challenge_btn.mouse_click()
-                            print("    🖱️ [先遣部队] 检测到隐藏复选框，已使用底层电信号完成穿透点击。")
+                            try:
+                                # 确保元素准备就绪后再发出点击电信号
+                                await challenge_btn.get_position()
+                                await challenge_btn.mouse_click()
+                                print("    🖱️ [先遣部队] 检测到隐藏复选框，已使用底层电信号完成穿透点击。")
+                            except Exception:
+                                pass
             except Exception:
                 pass
             
             await asyncio.sleep(1.5)
             
-        return ua, final_cookies
+        print("    ⚠️ [先遣部队] 45秒超时，未能拿到 Cookie，正在截取失败画面...")
+        # 📸 增加盲区视野：如果超时依然失败，截取当前虚拟机浏览器画面
+        try:
+            await driver.main_tab.save_screenshot("screenshots/zendriver_timeout_fail.png")
+        except Exception:
+            pass
+        return ua, []
+        
     except Exception as e:
         print(f"    ❌ [先遣部队] 执行任务遭遇异常: {e}")
+        try:
+            await driver.main_tab.save_screenshot("screenshots/zendriver_crash.png")
+        except:
+            pass
         return ua, []
     finally:
         await driver.stop()
@@ -156,6 +195,7 @@ def process_single_account(username, password):
 
     if not any(c['name'] == 'cf_clearance' for c in cookies_list):
         print("    ❌ 突破失败，未能拿到免死金牌。可能是该代理节点被 CF 彻底封杀，跳过该账号。")
+        print("    💡 提示：如果持续失败，请前往 GitHub Actions 运行记录的 Artifacts 下载 screenshots 查看 zendriver 失败截图。")
         return
         
     print(f"\n>>> 🤖 [主力部队] 携带战利品 (Cookie) 启动业务主引擎...")
