@@ -1,8 +1,8 @@
 name: 多账号自动登录续期任务(双引擎破盾版)
 
 on:
-  schedule:
-    - cron: '0 15 * * *'
+  #schedule:
+    #- cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
