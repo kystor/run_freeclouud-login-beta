@@ -1,14 +1,14 @@
-name: 多账号自动登录续期任务(双引擎破盾版)
+name: 多账号自动登录续期任务
 
 on:
-  #schedule:
-    #- cron: '0 15 * * *'
+  schedule:
+    - cron: '0 15 * * *'
   workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: 获取代码仓库
@@ -20,12 +20,21 @@ jobs:
           python-version: '3.10'
 
       - name: 安装 Python 依赖包
+        # 将输出写入日志，只有失败时才打印到控制台
         run: |
-          pip install seleniumbase ddddocr PyAutoGUI zendriver==0.15.3 latest_user_agents==0.0.5 user_agents==2.2.0
+          (
+            set -e
+            pip install seleniumbase ddddocr PyAutoGUI
+          ) > pip_install.log 2>&1 || {
+            echo "❌ 依赖安装失败，详细日志如下："
+            cat pip_install.log
+            exit 1
+          }
 
       - name: 🚀 智能解析全协议节点并启动代理内核
         env:
           PROXY: ${{ secrets.PROXY }}
+          # 【修复核心】将整段 Python 代码存为名为 PY_SCRIPT 的环境变量，完美避开缩进冲突！
           PY_SCRIPT: |
             import os, sys, json, base64
             from urllib.parse import urlparse, parse_qs
@@ -92,7 +101,7 @@ jobs:
                         if security == "reality":
                             outbound["streamSettings"]["realitySettings"] = {"publicKey": qs.get("pbk", [""])[0], "shortId": qs.get("sid", [""])[0], "fingerprint": qs.get("fp", ["chrome"])[0]}
 
-                elif link.startswith("socks5://") or link.startswith("socks://"):
+                elif link.startswith("socks5://"):
                     outbound["protocol"] = "socks"
                     parsed = urlparse(link)
                     server = {"address": parsed.hostname, "port": parsed.port or 1080}
@@ -107,33 +116,33 @@ jobs:
                 config["outbounds"].append(outbound)
                 with open("config.json", "w", encoding="utf-8") as f:
                     json.dump(config, f, indent=2)
+                    
+                print(f"✅ 成功将 {link[:8]}... 链接转换为 config.json 配置文件！")
+                
             except Exception as e:
                 print(f"❌ 解析链接时发生致命错误: {e}")
                 sys.exit(1)
         run: |
+          # 检查环境变量中是否填写了代理链接
           if [ -z "$PROXY" ]; then
               echo "❌ 错误：环境变量 PROXY 为空！"
               exit 1
           fi
 
-          if [[ "$PROXY" != *"://"* ]]; then
-              echo "🔄 检测到 PROXY 密文不含协议头，正在尝试进行 Base64 解码..."
-              PAD_PROXY=$PROXY
-              while [ $(( ${#PAD_PROXY} % 4 )) -ne 0 ]; do
-                  PAD_PROXY="${PAD_PROXY}="
-              done
-              DECODED=$(echo -n "$PAD_PROXY" | base64 -d 2>/dev/null || true)
-              if [[ "$DECODED" == *"://"* ]]; then
-                  PROXY="$DECODED"
-                  echo "✅ Base64 解码成功！"
-              fi
-          fi
-
-          PROXY=$(echo "$PROXY" | cut -d'#' -f1)
-
+          # ==========================================
+          # 分支 1：处理 Hysteria2 协议 (hy2:// 或 hysteria2://)
+          # ==========================================
           if [[ "$PROXY" == hysteria2://* ]] || [[ "$PROXY" == hy2://* ]]; then
-              wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
-              chmod +x hysteria
+              
+              (
+                set -e
+                wget https://github.com/apernet/hysteria/releases/latest/download/hysteria-linux-amd64 -O hysteria
+                chmod +x hysteria
+              ) > hysteria_setup.log 2>&1 || {
+                echo "❌ Hysteria 下载失败，详细日志如下："
+                cat hysteria_setup.log
+                exit 1
+              }
               
               AUTH=$(echo "$PROXY" | sed -n 's|.*://\([^@]*\)@.*|\1|p' || true)
               SERVER=$(echo "$PROXY" | sed -n 's|.*@\([^/?#]*\).*|\1|p' || true)
@@ -147,46 +156,68 @@ jobs:
               echo "socks5:" >> config.yaml
               echo "  listen: 127.0.0.1:10808" >> config.yaml
               
-              echo "FINAL_PROXY=socks5://127.0.0.1:10808" >> $GITHUB_ENV
-              echo "✅ 成功配置 Hysteria2 本地内核！"
+              echo "✅ 成功将 Hysteria2 链接转换为 config.yaml 配置文件！"
+              
               nohup ./hysteria client -c config.yaml > proxy.log 2>&1 &
-              sleep 5
               
+          # ==========================================
+          # 分支 2：处理原版的 Xray 逻辑 (VMess/VLESS/Trojan)
+          # ==========================================
           else
-              echo "⚡ [智能识别] 将代理交由 Xray 统一解析与连接..."
-              wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-              unzip Xray-linux-64.zip -x README.md
-              chmod +x xray
+              (
+                set -e
+                wget https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+                unzip Xray-linux-64.zip -x README.md
+                chmod +x xray
+              ) > xray_setup.log 2>&1 || {
+                echo "❌ Xray 下载或解压失败，详细日志如下："
+                cat xray_setup.log
+                exit 1
+              }
               
+              # 【修复核心】安全地将存放在环境变量中的 Python 代码输出为实体文件
               printf "%s\n" "$PY_SCRIPT" > parse_proxy.py
-              python -u parse_proxy.py
               
-              echo "FINAL_PROXY=socks5://127.0.0.1:10808" >> $GITHUB_ENV
+              # 运行 Python 解析脚本
+              python -u build_xray_config.py
+              
+              # 后台静默启动 Xray
               nohup ./xray run -c config.json > proxy.log 2>&1 &
-              sleep 5
           fi
+          
+          # 等待 5 秒建连
+          sleep 5
 
-      - name: 安装虚拟屏幕与指纹依赖
-        run: |
-          sudo apt-get update
-          echo ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true | sudo debconf-set-selections
-          sudo apt-get install -y xvfb fonts-noto-cjk ttf-mscorefonts-installer libxss1 libxi6 libgstreamer1.0-0 libnss3 libatk-bridge2.0-0 libgtk-3-0
-
-      - name: 运行双引擎自动化脚本
+      - name: 运行自动化脚本 (全局接管网络 + 虚拟屏幕)
         env:
           acount: ${{ secrets.ACOUNT }}
-          # 🌟 【核心修复点】将原本的 HTTP_PROXY 改名为自定义的 MY_PROXY，防止劫持 Python 内部流量
-          MY_PROXY: ${{ env.FINAL_PROXY }}
+          HTTP_PROXY: socks5://127.0.0.1:10808
+          HTTPS_PROXY: socks5://127.0.0.1:10808
+          ALL_PROXY: socks5://127.0.0.1:10808
+          NO_PROXY: localhost,127.0.0.1,::1
         run: |
-          echo ">>> [网络] 正在探测代理节点是否可用..."
-          curl -sS -x "$MY_PROXY" -I https://www.cloudflare.com/cdn-cgi/trace --connect-timeout 10 > curl_test.log 2>&1 || {
-            echo "⚠️ 代理测试未能成功，日志如下："
-            cat curl_test.log
-            echo "⚠️ 脚本将忽略此警告，强行启动浏览器进行尝试..."
+          (
+            set -e
+            curl -sS -x socks5://127.0.0.1:10808 -I https://www.baidu.com --connect-timeout 10
+          ) > curl_test.log 2>&1 || { 
+            echo "❌ 代理连接失败！为您提取底层日志："; 
+            echo "================ 代理核心运行日志 ================";
+            cat proxy.log;
+            echo "====================================================";
+            exit 1; 
           }
           
-          echo ">>> [系统] 浏览器引擎准备就绪，即将启动！"
-          xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login.py
+          (
+            set -e
+            sudo apt-get update
+            sudo apt-get install -y xvfb fonts-noto-cjk
+          ) > apt_install.log 2>&1 || {
+            echo "❌ 虚拟屏幕和字体安装失败，详细日志如下："
+            cat apt_install.log
+            exit 1
+          }
+          
+          xvfb-run --server-args="-screen 0 1920x1080x24" python -u auto_login_v2.py
 
       - name: 上传运行过程截图与日志文件
         uses: actions/upload-artifact@v4
